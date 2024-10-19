@@ -1,0 +1,17 @@
+[package]
+name = "bsdloader"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+log = "0.4"
+object = { version = "0.36", default-features = false, features = [
+    "elf",
+    "read_core",
+] }
+uefi = { version = "0.32", features = [
+    "alloc",
+    "logger",
+    "panic_handler",
+    "global_allocator",
+] }
