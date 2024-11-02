@@ -1,0 +1,40 @@
+name: build
+on:
+  push:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v3
+    - name: Install cosign
+      uses: sigstore/cosign-installer@v3.6.0
+    - name: Install Rust
+      uses: actions-rust-lang/setup-rust-toolchain@v1
+      with:
+        toolchain: stable
+        target: x86_64-unknown-uefi
+    - name: Build
+      run: ./build.sh
+    - name: Sign
+      if: startsWith(github.ref, 'refs/tags/')
+      run: |
+        set -e
+        mkdir build
+        cp target/x86_64-unknown-uefi/release/bsdloader.efi ./build/
+        cd build
+        cosign sign-blob -y --bundle bsdloader.cosign-bundle.json bsdloader.efi
+        ls -lash
+        cat bsdloader.cosign-bundle.json
+    - name: Publish release
+      if: startsWith(github.ref, 'refs/tags/')
+      uses: softprops/action-gh-release@v1
+      with:
+        files: |
+          ./build/bsdloader.efi
+          ./build/bsdloader.cosign-bundle.json
+        prerelease: true
