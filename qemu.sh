@@ -7,6 +7,18 @@ cd "$(dirname $0)"
 cp -f target/x86_64-unknown-uefi/release/bsdloader.efi ./esp/efi/boot/bootx64.efi
 cp -f kernel.elf ./esp/kernel.elf
 echo -e 'hw.uart.console=io:0x3f8,br:115200\nconsole=efi comconsole' > ./esp/kenv
+cd esp
+sha256sum kernel.elf > manifest
+sha256sum kenv >> manifest
+cat manifest
+secret_key="$(openssl genpkey -algorithm Ed25519 -out -)"
+openssl pkey -in <(echo "$secret_key") -pubout -outform DER -out - | tail -c 32 | xxd -p | tr -d '\n' > siginfo
+echo "" >> siginfo
+openssl pkeyutl -sign -inkey <(echo "$secret_key") -out - -rawin -in manifest | xxd -p | tr -d '\n' >> siginfo
+echo "" >> siginfo
+cat siginfo
+rm manifest
+cd ..
 
 swtpm socket --tpmstate dir=/tmp/mytpm1 \
   --ctrl type=unixio,path=/tmp/mytpm1/swtpm-sock \

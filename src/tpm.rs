@@ -1,6 +1,5 @@
 use core::sync::atomic::AtomicBool;
 
-use alloc::format;
 use uefi::{
     boot::PAGE_SIZE,
     proto::tcg::{
@@ -82,7 +81,7 @@ pub fn read_tpm_event_log(staging: &mut StagingRegion) -> Option<StagingRegionHa
     Some(buf)
 }
 
-pub fn measure_image(image: &[u8], pcr: PcrIndex, image_name: &str) {
+pub fn measure_image(image: &[u8], pcr: PcrIndex, event_data: &[u8]) {
     static DID_PRINT_TCG_CAPABILITY: AtomicBool = AtomicBool::new(false);
 
     if image.is_empty() {
@@ -120,16 +119,15 @@ pub fn measure_image(image: &[u8], pcr: PcrIndex, image_name: &str) {
         log::info!("Tcg capability: {:?}", capability);
     }
 
-    let event_data = format!("{}\0", image_name);
     protocol
         .hash_log_extend_event(
             HashLogExtendEventFlags::empty(),
             image,
-            &PcrEventInputs::new_in_box(pcr, EventType::IPL, event_data.as_bytes())
+            &PcrEventInputs::new_in_box(pcr, EventType::IPL, event_data)
                 .expect("failed to create PcrEventInputs"),
         )
         .expect("failed to extend PCR");
-    log::info!("Extended PCR {}: {}", pcr.0, image_name);
+    log::info!("Extended PCR {}", pcr.0);
 }
 
 fn fix_pcr_event_digests_lifetime<'a>(event: &PcrEvent<'a>) -> PcrEventDigests<'a> {

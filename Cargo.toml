@@ -3,12 +3,20 @@ name = "bsdloader"
 version = "0.1.0"
 edition = "2021"
 
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 'z'
+
 [dependencies]
+ed25519-dalek = { version = "2", default-features = false, features = ["digest"] }
+hex = { version = "0.4", default-features = false }
 log = "0.4"
 object = { version = "0.36", default-features = false, features = [
     "elf",
     "read_core",
 ] }
+sha2 = { version = "0.10", default-features = false }
 uefi = { version = "0.32", features = [
     "alloc",
     "logger",

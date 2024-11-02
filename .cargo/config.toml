@@ -1,2 +1,3 @@
 [build]
 target = "x86_64-unknown-uefi"
+rustflags = ["--cfg", "curve25519_dalek_backend=\"fiat\"", "-C", "link-args=/Brepro", "-C", "link-args=/debug:none"]

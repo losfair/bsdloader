@@ -79,7 +79,7 @@ pub fn load_image_from_disk(filename: &str, buffer: &mut [u8]) -> Option<usize> 
     let file = match volume.open(filename, FileMode::Read, FileAttribute::empty()) {
         Ok(x) => x,
         Err(e) => {
-            log::error!("failed to open file: {:?}", e);
+            log::error!("failed to open file '{}': {:?}", filename, e);
             return None;
         }
     };
