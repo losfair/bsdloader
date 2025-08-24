@@ -23,15 +23,23 @@ pub struct StagingRegionHandle {
 }
 
 impl StagingRegion {
-    pub fn new(size: usize) -> Self {
-        assert!(size >= 16 * 1048576);
+    pub fn new() -> Self {
+        let mut staging = None;
 
-        let staging = uefi::boot::allocate_pages(
-            AllocateType::MaxAddress(0x1_0000_0000u64),
-            MemoryType::LOADER_CODE,
-            size / PAGE_SIZE,
-        )
-        .expect("failed to allocate staging region");
+        for size in (300..1600).step_by(100).rev().map(|x| x * 1048576) {
+            match uefi::boot::allocate_pages(
+                AllocateType::MaxAddress(0x1_0000_0000u64),
+                MemoryType::LOADER_CODE,
+                size / PAGE_SIZE,
+            ) {
+                Ok(x) => {
+                    staging = Some((x, size));
+                    break;
+                }
+                Err(_) => {}
+            }
+        }
+        let (staging, size) = staging.expect("failed to allocate staging region");
         let offset = staging.align_offset(STAGING_ALIGNMENT);
         assert!(offset < STAGING_ALIGNMENT);
         let ptr = unsafe { staging.add(offset) };

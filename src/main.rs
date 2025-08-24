@@ -27,11 +27,12 @@ fn main() -> Status {
 
     log::info!("Starting...");
 
-    let mut staging = StagingRegion::new(300 * 1048576);
+    let mut staging = StagingRegion::new();
 
     let mut kernel_load_region = staging.allocate(50 * 1048576);
 
-    let mut kernel_buffer = staging.allocate(200 * 1048576);
+    let kernel_buffer = staging.size() - 70 * 1048576;
+    let mut kernel_buffer = staging.allocate(kernel_buffer);
     let kernel_buffer_len =
         load_image_from_disk("kernel.elf", &mut kernel_buffer[..]).expect("kernel.elf not found");
     let mut kernel_buffer = staging.shrink(kernel_buffer, kernel_buffer_len);
