@@ -1,2 +1,2 @@
 54a5d9aaccc1a356ad95fe3a5567baaf5f86ae3a78cd3a3026dff03ba14bb9eb  bsdloader-openbsd.efi
-68aff7559648b4a7b8bcc282a6a340758969f94f2740b57338b06bbe44de13e2  bsdloader-freebsd.efi
+b9341a30218038082ae7ca1673e58a61ad1870edb6b27171170eb3520fac7db6  bsdloader-freebsd.efi

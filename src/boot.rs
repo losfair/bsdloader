@@ -155,7 +155,13 @@ pub fn boot_kernel(
     }
 
     modinfo::push(&mut staging, modinfo::MODINFO_NAME, b"freebsd\0");
-    modinfo::push(&mut staging, modinfo::MODINFO_TYPE, b"elf64 kernel\0");
+    // The kernel module type must be "elf kernel" (KERNTYPE), the type the
+    // native FreeBSD loader emits and the one the kernel searches for. FreeBSD
+    // <= 14 also accepted the legacy "elf64 kernel" spelling as a fallback, but
+    // FreeBSD 15 removed that fallback (sys/kern/subr_module.c: preload_initkmdp
+    // searches only KERNTYPE) and panics with "unable to find kernel metadata"
+    // if it is missing.
+    modinfo::push(&mut staging, modinfo::MODINFO_TYPE, b"elf kernel\0");
 
     modinfo::push(
         &mut staging,
