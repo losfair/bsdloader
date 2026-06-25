@@ -213,13 +213,13 @@ pub fn boot_kernel(
         "failed to allocate memory for trampoline"
     })?;
 
-    let trampcode_size = amd64_tramp_end as usize - amd64_tramp as usize;
+    let trampcode_size = amd64_tramp_end as *const () as usize - amd64_tramp as *const () as usize;
     assert!(trampcode_size <= PAGE_SIZE - 128);
 
     unsafe {
         trampcode.write_bytes(0u8, PAGE_SIZE);
         trampcode.copy_from_nonoverlapping(
-            NonNull::new(amd64_tramp as usize as *mut u8).expect("bad amd64_tramp"),
+            NonNull::new(amd64_tramp as *const () as *mut u8).expect("bad amd64_tramp"),
             trampcode_size,
         );
     }

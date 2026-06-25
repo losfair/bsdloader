@@ -184,7 +184,7 @@ pub fn run() -> Status {
     unsafe { av_ptr.write_bytes(0u8, av_pages * PAGE_SIZE) };
     let av = unsafe { core::slice::from_raw_parts_mut(av_ptr.as_ptr(), av_pages * PAGE_SIZE) };
 
-    let tramp_size = obsd_tramp_end as usize - obsd_tramp as usize;
+    let tramp_size = obsd_tramp_end as *const () as usize - obsd_tramp as *const () as usize;
     let tramp_pages = round_up(tramp_size, PAGE_SIZE) / PAGE_SIZE;
     let tramp_ptr = uefi::boot::allocate_pages(
         AllocateType::MaxAddress(0x1_0000_0000u64),
@@ -196,7 +196,7 @@ pub fn run() -> Status {
     unsafe {
         tramp_ptr.write_bytes(0u8, tramp_pages * PAGE_SIZE);
         tramp_ptr.copy_from_nonoverlapping(
-            NonNull::new(obsd_tramp as usize as *mut u8).unwrap(),
+            NonNull::new(obsd_tramp as *const () as *mut u8).unwrap(),
             tramp_size,
         );
     }

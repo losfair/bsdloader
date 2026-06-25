@@ -13,6 +13,9 @@
 //! ExitBootServices the caller moves the image down to its final low physical
 //! address (`marks[MARK_*] - efi_loadaddr`).
 
+use rand_chacha::rand_core::{Rng, SeedableRng};
+use rand_chacha::ChaCha8Rng;
+
 use crate::util::round_up;
 
 // marks[] indices (sys/lib/libsa/loadfile.h)
@@ -106,6 +109,11 @@ pub fn load(image: &[u8], staging: &mut [u8], efi_loadaddr: u64) -> LoadedKernel
     let mut minp: u64 = !0;
     let mut maxp: u64 = 0;
 
+    // ChaCha8 stream seeded once from the hardware RNG, used to fill any
+    // PT_OPENBSD_RANDOMIZE segment(s). Seeded lazily so we only require RDRAND
+    // when a randomize segment is actually present.
+    let mut rng: Option<ChaCha8Rng> = None;
+
     // ---- Program headers: text/data/bss + randomize ----
     for i in 0..e_phnum {
         let ph = phdr(image, e_phoff + i * PHDR_SIZE);
@@ -113,7 +121,8 @@ pub fn load(image: &[u8], staging: &mut [u8], efi_loadaddr: u64) -> LoadedKernel
         if ph.p_type == PT_OPENBSD_RANDOMIZE {
             let dst = soff(ph.p_paddr);
             let bounds = check_bounds(staging.len(), dst, ph.p_filesz as usize, "PT_OPENBSD_RANDOMIZE");
-            fill_random(&mut staging[dst..bounds]);
+            rng.get_or_insert_with(seed_chacha8)
+                .fill_bytes(&mut staging[dst..bounds]);
             marks[MARK_RANDOM] = loadaddr(ph.p_paddr);
             marks[MARK_ERANDOM] = marks[MARK_RANDOM] + ph.p_filesz;
             continue;
@@ -272,19 +281,13 @@ fn cstr(strtab: &[u8], off: usize) -> &[u8] {
     &strtab[off..end]
 }
 
-/// Fill a buffer with random bytes for `PT_OPENBSD_RANDOMIZE`.
-/// Uses the CPU hardware RNG (RDRAND), which is required; panics if RDRAND
-/// never returns a value.
-fn fill_random(buf: &mut [u8]) {
-    let mut chunks = buf.chunks_exact_mut(8);
-    for c in &mut chunks {
-        c.copy_from_slice(&rand64().to_le_bytes());
+/// Seed a ChaCha8 RNG from the CPU hardware RNG (RDRAND).
+fn seed_chacha8() -> ChaCha8Rng {
+    let mut seed = [0u8; 32];
+    for chunk in seed.chunks_exact_mut(8) {
+        chunk.copy_from_slice(&rand64().to_le_bytes());
     }
-    let rem = chunks.into_remainder();
-    if !rem.is_empty() {
-        let r = rand64().to_le_bytes();
-        rem.copy_from_slice(&r[..rem.len()]);
-    }
+    ChaCha8Rng::from_seed(seed)
 }
 
 /// Read a 64-bit value from the CPU's hardware RNG. RDRAND is required.
