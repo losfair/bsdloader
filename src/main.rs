@@ -35,7 +35,7 @@ use uefi::prelude::*;
 fn main() -> Status {
     uefi::helpers::init().unwrap();
 
-    log::info!("bsdloader starting...");
+    log::info!("bsdloader {} starting...", env!("CARGO_PKG_VERSION"));
 
     #[cfg(feature = "openbsd")]
     {
