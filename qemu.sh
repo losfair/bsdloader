@@ -4,6 +4,7 @@ set -e
 
 cd "$(dirname $0)"
 
+cargo build --release --no-default-features --features freebsd
 cp -f target/x86_64-unknown-uefi/release/bsdloader.efi ./esp/efi/boot/bootx64.efi
 cp -f kernel.elf ./esp/kernel.elf
 echo -e 'hw.uart.console=io:0x3f8,br:115200\nconsole=efi comconsole' > ./esp/kenv

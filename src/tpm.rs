@@ -1,19 +1,26 @@
 use core::sync::atomic::AtomicBool;
 
 use uefi::{
-    boot::PAGE_SIZE,
     proto::tcg::{
-        v2::{HashLogExtendEventFlags, PcrEvent, PcrEventDigests, PcrEventInputs, Tcg},
+        v2::{HashLogExtendEventFlags, PcrEventInputs, Tcg},
         EventType, PcrIndex,
     },
     Identify,
 };
 
+#[cfg(feature = "freebsd")]
+use uefi::{
+    boot::PAGE_SIZE,
+    proto::tcg::v2::{PcrEvent, PcrEventDigests},
+};
+
+#[cfg(feature = "freebsd")]
 use crate::{
     staging::{StagingRegion, StagingRegionHandle},
     util::round_up,
 };
 
+#[cfg(feature = "freebsd")]
 #[allow(dead_code)]
 struct VeryUnsafeEventLog {
     location: *const u8,
@@ -22,6 +29,7 @@ struct VeryUnsafeEventLog {
     is_truncated: bool,
 }
 
+#[cfg(feature = "freebsd")]
 pub fn read_tpm_event_log(staging: &mut StagingRegion) -> Option<StagingRegionHandle> {
     let Some(protocol) =
         uefi::boot::locate_handle_buffer(uefi::boot::SearchType::ByProtocol(&Tcg::GUID))
@@ -81,6 +89,7 @@ pub fn read_tpm_event_log(staging: &mut StagingRegion) -> Option<StagingRegionHa
     Some(buf)
 }
 
+#[allow(dead_code)]
 pub fn measure_image(image: &[u8], pcr: PcrIndex, event_data: &[u8]) {
     static DID_PRINT_TCG_CAPABILITY: AtomicBool = AtomicBool::new(false);
 
@@ -130,15 +139,18 @@ pub fn measure_image(image: &[u8], pcr: PcrIndex, event_data: &[u8]) {
     log::info!("Extended PCR {}", pcr.0);
 }
 
+#[cfg(feature = "freebsd")]
 fn fix_pcr_event_digests_lifetime<'a>(event: &PcrEvent<'a>) -> PcrEventDigests<'a> {
     let bad = event.digests();
     unsafe { core::mem::transmute::<PcrEventDigests<'_>, PcrEventDigests<'a>>(bad) }
 }
 
+#[cfg(feature = "freebsd")]
 fn fix_pcr_event_data_lifetime<'a>(event: &PcrEvent<'a>) -> &'a [u8] {
     unsafe { core::mem::transmute::<&[u8], &'a [u8]>(event.event_data()) }
 }
 
+#[cfg(feature = "freebsd")]
 fn get_tpm2_header(log: &VeryUnsafeEventLog) -> &[u8] {
     unsafe {
         let ptr_u32: *const u32 = log.location.cast();

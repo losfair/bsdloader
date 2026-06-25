@@ -29,6 +29,7 @@ impl OwnedBuffer {
         }
     }
 
+    #[allow(dead_code)]
     pub fn leak(self) -> &'static mut [u8] {
         let ptr = self.ptr;
         let len = self.len;
