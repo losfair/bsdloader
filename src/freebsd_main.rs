@@ -1,67 +1,75 @@
 use alloc::format;
+use alloc::vec;
 use alloc::{borrow::Cow, collections::btree_map::BTreeMap};
 use sha2::{Digest, Sha256};
-use uefi::boot::AllocateType;
 use uefi::{prelude::*, proto::tcg::PcrIndex};
 
-use crate::boot::{boot_kernel, load_elf};
-use crate::image_loader::{load_image_from_disk, OwnedBuffer};
+use crate::boot::{boot_kernel, load_elf, loaded_size, memdisk_range};
+use crate::image_loader::read_file;
 use crate::staging::StagingRegion;
 use crate::tpm::measure_image;
+use crate::util::round_up;
+
+/// Headroom in the staging region beyond the loaded kernel and memory disk, for
+/// the environment, modinfo records, TPM event log and the 8 MiB the kernel
+/// reserves past `kernend`.
+const STAGING_RESERVE: usize = 24 * 1024 * 1024;
 
 pub fn run() -> Status {
-    let mut staging = StagingRegion::new();
+    // ---- Read kernel.elf into its own buffer (freed after loading) ----
+    let kernel = read_file("kernel.elf").expect("kernel.elf not found");
+    measure_image(&kernel, PcrIndex(9), b"kernel.elf\0");
+    let kernel_sha256 = Sha256::digest(&kernel);
 
-    let mut kernel_load_region = staging.allocate(50 * 1048576);
-
-    let kernel_buffer = staging.size() - 70 * 1048576;
-    let mut kernel_buffer = staging.allocate(kernel_buffer);
-    let kernel_buffer_len =
-        load_image_from_disk("kernel.elf", &mut kernel_buffer[..]).expect("kernel.elf not found");
-    let mut kernel_buffer = staging.shrink(kernel_buffer, kernel_buffer_len);
-    measure_image(&kernel_buffer[..], PcrIndex(9), b"kernel.elf\0");
-    let kernel_sha256 = Sha256::digest(&kernel_buffer[..]);
-
-    let kenv_sha256;
-    let kenv = {
-        let kenv_buffer =
-            OwnedBuffer::new(AllocateType::MaxAddress(0x1_0000_0000u64), 16384).leak();
-        let kenv_buffer_len =
-            load_image_from_disk("kenv", &mut kenv_buffer[..]).unwrap_or_default();
-        let kenv_buffer_len = if kenv_buffer_len == 0 {
-            kenv_buffer[0] = b'\n';
-            1
-        } else {
-            kenv_buffer_len
-        };
-        let kenv_buffer = &kenv_buffer[..kenv_buffer_len];
-        kenv_sha256 = Sha256::digest(kenv_buffer);
-        measure_image(&kenv_buffer[..], PcrIndex(9), b"kenv\0");
-        parse_kenv(&kenv_buffer[..])
+    // ---- kenv (optional; measured as a single newline when absent/empty) ----
+    let kenv_buf = read_file("kenv").unwrap_or_default();
+    let kenv_buf: &'static [u8] = if kenv_buf.is_empty() {
+        vec![b'\n'].leak()
+    } else {
+        kenv_buf.leak()
     };
+    let kenv_sha256 = Sha256::digest(kenv_buf);
+    measure_image(kenv_buf, PcrIndex(9), b"kenv\0");
+    let kenv = parse_kenv(kenv_buf);
 
+    // ---- Signature verification + PCR14 key measurement ----
     let mut kernel_sha256_str = [0u8; 64];
     hex::encode_to_slice(&kernel_sha256, &mut kernel_sha256_str).unwrap();
     let kernel_sha256_str = core::str::from_utf8(&kernel_sha256_str).unwrap();
-
     let mut kenv_sha256_str = [0u8; 64];
     hex::encode_to_slice(&kenv_sha256, &mut kenv_sha256_str).unwrap();
     let kenv_sha256_str = core::str::from_utf8(&kenv_sha256_str).unwrap();
-
     let manifest = format!(
         "{}  kernel.elf\n{}  kenv\n",
         kernel_sha256_str, kenv_sha256_str
     );
     crate::sig::verify_and_measure_key(manifest.as_bytes());
 
-    let kernel_elf = load_elf(&mut kernel_load_region, &kernel_buffer);
-    let memdisk = if let Some((offset, size)) = kernel_elf.memdisk_file_range {
-        kernel_buffer.copy_within(offset as usize..(offset + size) as usize, 0);
-        Some(staging.shrink(kernel_buffer, size as usize))
-    } else {
-        staging.shrink(kernel_buffer, 0);
-        None
-    };
+    // ---- Size the staging region to the loaded kernel + memory disk ----
+    let kern_size = loaded_size(&kernel);
+    let memdisk = memdisk_range(&kernel);
+    let memdisk_size = memdisk.map(|(_, s)| s).unwrap_or(0);
+    let staging_size = round_up(kern_size, 1048576 * 2)
+        + round_up(memdisk_size, 1048576 * 2)
+        + STAGING_RESERVE;
+    log::info!(
+        "staging: {} MiB (kernel {} MiB + memdisk {} MiB + reserve {} MiB)",
+        staging_size / 1048576,
+        kern_size / 1048576,
+        memdisk_size / 1048576,
+        STAGING_RESERVE / 1048576
+    );
+    let mut staging = StagingRegion::with_size(staging_size);
+
+    // ---- Load the kernel and stage the memory disk ----
+    let mut kernel_load_region = staging.allocate(kern_size);
+    let kernel_elf = load_elf(&mut kernel_load_region, &kernel);
+    let memdisk = memdisk.map(|(offset, size)| {
+        let mut h = staging.allocate(size);
+        h.copy_from_slice(&kernel[offset..offset + size]);
+        h
+    });
+    drop(kernel);
 
     match boot_kernel(staging, kernel_elf, memdisk, kenv) {
         Ok(x) => match x {},

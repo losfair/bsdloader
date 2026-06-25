@@ -12,8 +12,10 @@ compile_error!(
 #[cfg(all(feature = "openbsd", feature = "freebsd"))]
 compile_error!("the `openbsd` and `freebsd` features are mutually exclusive; enable exactly one");
 
+mod elf64;
 mod image_loader;
 mod sig;
+mod sysmem;
 mod tpm;
 mod util;
 

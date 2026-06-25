@@ -3,11 +3,12 @@ use core::{
     ptr::NonNull,
 };
 
-use uefi::boot::{AllocateType, MemoryType, PAGE_SIZE};
+use uefi::boot::MemoryType;
 
+use crate::sysmem;
 use crate::util::round_up;
 
-pub const STAGING_ALIGNMENT: usize = 2 * 1048576;
+pub const STAGING_ALIGNMENT: usize = sysmem::STAGING_ALIGN;
 const BASE_START_GAP: usize = 0x20_0000;
 
 pub struct StagingRegion {
@@ -23,33 +24,14 @@ pub struct StagingRegionHandle {
 }
 
 impl StagingRegion {
-    pub fn new() -> Self {
-        let mut staging = None;
-
-        for size in (300..1600).step_by(100).rev().map(|x| x * 1048576) {
-            match uefi::boot::allocate_pages(
-                AllocateType::MaxAddress(0x1_0000_0000u64),
-                MemoryType::LOADER_CODE,
-                size / PAGE_SIZE,
-            ) {
-                Ok(x) => {
-                    staging = Some((x, size));
-                    break;
-                }
-                Err(_) => {}
-            }
-        }
-        let (staging, size) = staging.expect("failed to allocate staging region");
-        let offset = staging.align_offset(STAGING_ALIGNMENT);
-        assert!(offset < STAGING_ALIGNMENT);
-        let ptr = unsafe { staging.add(offset) };
-        let len = (size - offset) & !(STAGING_ALIGNMENT - 1);
+    /// Allocate a staging region of (at least) `size` bytes below 4 GiB. No
+    /// fallback: panics if the request cannot be satisfied.
+    pub fn with_size(size: usize) -> Self {
+        let (ptr, len) = sysmem::alloc_staging(size, 0x1_0000_0000u64, MemoryType::LOADER_CODE);
         unsafe {
             ptr.write_bytes(0, len);
         }
-
         log::info!("Allocated staging at {:p}, length {}", ptr, len);
-
         Self {
             ptr,
             len,
@@ -68,17 +50,6 @@ impl StagingRegion {
         };
         self.watermark += len;
         h
-    }
-
-    pub fn shrink(&mut self, mut handle: StagingRegionHandle, to: usize) -> StagingRegionHandle {
-        assert!(handle.vm_offset_from_base + handle.len == BASE_START_GAP + self.watermark);
-        assert!(to <= handle.len);
-        self.watermark -= handle.len - to;
-        unsafe {
-            self.ptr.add(self.watermark).write_bytes(0, handle.len - to);
-        }
-        handle.len = to;
-        handle
     }
 
     pub fn ptr(&self) -> NonNull<u8> {

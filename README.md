@@ -35,9 +35,10 @@ The OpenBSD backend loads an OpenBSD/amd64 kernel the way OpenBSD's native EFI
 `boot(8)` does:
 
 - reads `bsd.rd` (or `bsd`) from the ESP — plain ELF **or** gzip-compressed;
-- places it in a 64 MiB EFI staging region below 256 MiB using OpenBSD
-  `LOADADDR()` semantics, handling `PT_LOAD`, BSS, `PT_OPENBSD_RANDOMIZE`
-  (filled via **RDRAND**), symbols and section headers (`LOAD_ALL`);
+- places it in an EFI staging region below 256 MiB, sized to the image and
+  validated against free memory, using OpenBSD `LOADADDR()` semantics — handling
+  `PT_LOAD`, BSS, `PT_OPENBSD_RANDOMIZE` (filled from a **ChaCha8** RNG seeded
+  via **RDRAND**), symbols and section headers (`LOAD_ALL`);
 - builds the OpenBSD 32-bit bootarg vector: `BOOTARG_MEMMAP` (BIOS-style memory
   map derived from the EFI map), `BOOTARG_EFIINFO` (ACPI/SMBIOS/system table /
   GOP framebuffer / EFI memory map, `BEI_64BIT`), `BOOTARG_CONSDEV` and

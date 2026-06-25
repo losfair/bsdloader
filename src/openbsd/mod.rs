@@ -24,7 +24,7 @@ use uefi::table::cfg::{ACPI2_GUID, ACPI_GUID, SMBIOS_GUID};
 
 use crate::image_loader::read_file;
 use crate::tpm::measure_image;
-use crate::util::round_up;
+use crate::{sysmem, util::round_up};
 use bootargs::{serial, BiosConsdev, BiosEfiInfo, BootArgs};
 
 global_asm!(include_str!("trampoline.S"), options(att_syntax));
@@ -36,8 +36,10 @@ extern "C" {
 
 type Trampoline = unsafe extern "sysv64" fn(params: u64) -> !;
 
-/// Size of the OpenBSD kernel staging region (must stay below 256MB).
-const KERN_LOADSPACE_SIZE: usize = 64 * 1024 * 1024;
+/// OpenBSD's `LOADADDR()` masks physical addresses with `0x0fffffff`, so the
+/// entire loaded image must fit within — and the staging region must lie below
+/// — this low 256 MiB window. RAM above it cannot back the staging region.
+const OPENBSD_LOAD_WINDOW: usize = 0x1000_0000;
 
 /// Kernel image filename on the ESP.
 const KERNEL_NAME: &str = "bsd.rd";
@@ -76,18 +78,26 @@ pub fn run() -> Status {
         file_buf
     };
 
-    // ---- Allocate the low staging region (efi_loadaddr) ----
-    let staging_ptr = uefi::boot::allocate_pages(
-        AllocateType::MaxAddress(0x1000_0000u64),
-        MemoryType::LOADER_DATA,
-        KERN_LOADSPACE_SIZE / PAGE_SIZE,
-    )
-    .expect("failed to allocate kernel load space below 256MB");
+    // ---- Allocate the low staging region (efi_loadaddr), sized to the image ----
+    // The kernel loads at `p_paddr & 0x0fffffff`, so the whole image (incl. its
+    // 16 MiB base offset, BSS and symbols) must fit the low 256 MiB window.
+    let need = elf::measure(&kernel);
+    assert!(
+        need < OPENBSD_LOAD_WINDOW,
+        "kernel image ({} MiB) exceeds the {} MiB OpenBSD load window",
+        need / 1048576,
+        OPENBSD_LOAD_WINDOW / 1048576
+    );
+    let (staging_ptr, staging_len) =
+        sysmem::alloc_staging(need, OPENBSD_LOAD_WINDOW as u64, MemoryType::LOADER_DATA);
     let efi_loadaddr = staging_ptr.as_ptr() as u64;
-    log::info!("efi_loadaddr = 0x{:x}", efi_loadaddr);
-    let staging = unsafe {
-        core::slice::from_raw_parts_mut(staging_ptr.as_ptr(), KERN_LOADSPACE_SIZE)
-    };
+    log::info!(
+        "staging: {} MiB at 0x{:x} (kernel needs {} MiB)",
+        staging_len / 1048576,
+        efi_loadaddr,
+        need / 1048576
+    );
+    let staging = unsafe { core::slice::from_raw_parts_mut(staging_ptr.as_ptr(), staging_len) };
 
     // ---- Load the ELF (OpenBSD LOAD_ALL semantics) ----
     let loaded = elf::load(&kernel, staging, efi_loadaddr);
