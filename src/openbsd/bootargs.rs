@@ -136,7 +136,7 @@ pub mod serial {
         }
     }
 
-    pub fn puthex(mut v: u64) {
+    pub fn puthex(v: u64) {
         puts("0x");
         let mut started = false;
         for i in (0..16).rev() {
@@ -147,6 +147,5 @@ pub mod serial {
                 putc(c);
             }
         }
-        let _ = &mut v;
     }
 }

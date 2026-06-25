@@ -13,6 +13,7 @@ compile_error!(
 compile_error!("the `openbsd` and `freebsd` features are mutually exclusive; enable exactly one");
 
 mod image_loader;
+mod sig;
 mod tpm;
 mod util;
 

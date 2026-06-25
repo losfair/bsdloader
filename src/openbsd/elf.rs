@@ -112,7 +112,8 @@ pub fn load(image: &[u8], staging: &mut [u8], efi_loadaddr: u64) -> LoadedKernel
 
         if ph.p_type == PT_OPENBSD_RANDOMIZE {
             let dst = soff(ph.p_paddr);
-            fill_random(&mut staging[dst..dst + ph.p_filesz as usize]);
+            let bounds = check_bounds(staging.len(), dst, ph.p_filesz as usize, "PT_OPENBSD_RANDOMIZE");
+            fill_random(&mut staging[dst..bounds]);
             marks[MARK_RANDOM] = loadaddr(ph.p_paddr);
             marks[MARK_ERANDOM] = marks[MARK_RANDOM] + ph.p_filesz;
             continue;
@@ -126,7 +127,7 @@ pub fn load(image: &[u8], staging: &mut [u8], efi_loadaddr: u64) -> LoadedKernel
         let fstart = ph.p_offset as usize;
         let fsz = ph.p_filesz as usize;
         let dst = soff(ph.p_paddr);
-        staging[dst..dst + fsz].copy_from_slice(&image[fstart..fstart + fsz]);
+        write_at(staging, dst, &image[fstart..fstart + fsz], "PT_LOAD segment");
 
         // Track loaded range (COUNT_TEXT | COUNT_DATA).
         let mut pos = ph.p_paddr;
@@ -142,7 +143,8 @@ pub fn load(image: &[u8], staging: &mut [u8], efi_loadaddr: u64) -> LoadedKernel
         if ph.p_filesz < ph.p_memsz {
             let bss = soff(ph.p_paddr + ph.p_filesz);
             let bsz = (ph.p_memsz - ph.p_filesz) as usize;
-            staging[bss..bss + bsz].fill(0);
+            let end = check_bounds(staging.len(), bss, bsz, "PT_LOAD bss");
+            staging[bss..end].fill(0);
             pos += ph.p_memsz - ph.p_filesz;
             if maxp < pos {
                 maxp = pos;
@@ -194,8 +196,12 @@ pub fn load(image: &[u8], staging: &mut [u8], efi_loadaddr: u64) -> LoadedKernel
 
         if havesyms {
             let dst = soff(maxp);
-            staging[dst..dst + sh_size as usize]
-                .copy_from_slice(&image[sh_offset..sh_offset + sh_size as usize]);
+            write_at(
+                staging,
+                dst,
+                &image[sh_offset..sh_offset + sh_size as usize],
+                "symbol/string section",
+            );
         }
         maxp += round_up(sh_size as usize, 8) as u64;
 
@@ -209,7 +215,7 @@ pub fn load(image: &[u8], staging: &mut [u8], efi_loadaddr: u64) -> LoadedKernel
 
     // BCOPY(shp, shpp, sz)
     let shpp_dst = soff(shpp);
-    staging[shpp_dst..shpp_dst + sz].copy_from_slice(&shp);
+    write_at(staging, shpp_dst, &shp, "section header table");
 
     // ---- Frob and copy the ELF header (LOAD_HDR) ----
     let mut ehdr: alloc::vec::Vec<u8> = image[0..EHDR_SIZE].to_vec();
@@ -218,7 +224,7 @@ pub fn load(image: &[u8], staging: &mut [u8], efi_loadaddr: u64) -> LoadedKernel
     ehdr[54..56].copy_from_slice(&0u16.to_le_bytes()); // e_phentsize = 0
     ehdr[56..58].copy_from_slice(&0u16.to_le_bytes()); // e_phnum = 0
     let elfp_dst = soff(elfp);
-    staging[elfp_dst..elfp_dst + EHDR_SIZE].copy_from_slice(&ehdr);
+    write_at(staging, elfp_dst, &ehdr, "ELF header");
 
     marks[MARK_START] = loadaddr(minp);
     marks[MARK_ENTRY] = loadaddr(e_entry);
@@ -235,6 +241,28 @@ pub fn load(image: &[u8], staging: &mut [u8], efi_loadaddr: u64) -> LoadedKernel
     LoadedKernel { marks, e_entry }
 }
 
+/// Assert that `[off, off+len)` fits within a staging region of `staging_len`
+/// bytes, returning the end offset. Gives a clear diagnostic instead of an
+/// opaque slice-index panic when a kernel image overruns the 64 MiB region.
+fn check_bounds(staging_len: usize, off: usize, len: usize, what: &str) -> usize {
+    let end = off + len;
+    assert!(
+        end <= staging_len,
+        "{} at staging offset {:#x}..{:#x} exceeds the {:#x}-byte staging region",
+        what,
+        off,
+        end,
+        staging_len
+    );
+    end
+}
+
+/// Bounds-checked copy of `data` into `staging` at byte offset `off`.
+fn write_at(staging: &mut [u8], off: usize, data: &[u8], what: &str) {
+    let end = check_bounds(staging.len(), off, data.len(), what);
+    staging[off..end].copy_from_slice(data);
+}
+
 fn cstr(strtab: &[u8], off: usize) -> &[u8] {
     let end = strtab[off..]
         .iter()
@@ -245,7 +273,8 @@ fn cstr(strtab: &[u8], off: usize) -> &[u8] {
 }
 
 /// Fill a buffer with random bytes for `PT_OPENBSD_RANDOMIZE`.
-/// Prefers RDRAND; falls back to a TSC-seeded xorshift if unavailable.
+/// Uses the CPU hardware RNG (RDRAND), which is required; panics if RDRAND
+/// never returns a value.
 fn fill_random(buf: &mut [u8]) {
     let mut chunks = buf.chunks_exact_mut(8);
     for c in &mut chunks {

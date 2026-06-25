@@ -13,8 +13,7 @@ mod memmap;
 use core::arch::global_asm;
 use core::ptr::NonNull;
 
-use alloc::{format, vec};
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use alloc::format;
 use sha2::{Digest, Sha256};
 use uefi::boot::{AllocateType, MemoryType, PAGE_SIZE};
 use uefi::mem::memory_map::{MemoryMap, MemoryMapOwned};
@@ -23,7 +22,7 @@ use uefi::proto::console::gop::{GraphicsOutput, PixelFormat};
 use uefi::proto::tcg::PcrIndex;
 use uefi::table::cfg::{ACPI2_GUID, ACPI_GUID, SMBIOS_GUID};
 
-use crate::image_loader::load_image_from_disk;
+use crate::image_loader::read_file;
 use crate::tpm::measure_image;
 use crate::util::round_up;
 use bootargs::{serial, BiosConsdev, BiosEfiInfo, BootArgs};
@@ -61,11 +60,9 @@ struct TrampParams {
 
 pub fn run() -> Status {
     // ---- Read the kernel image from the ESP ----
-    let mut file_buf = vec![0u8; 48 * 1024 * 1024];
-    let n = load_image_from_disk(KERNEL_NAME, &mut file_buf)
+    let file_buf = read_file(KERNEL_NAME)
         .unwrap_or_else(|| panic!("{} not found on ESP", KERNEL_NAME));
-    file_buf.truncate(n);
-    log::info!("Loaded {} ({} bytes)", KERNEL_NAME, n);
+    log::info!("Loaded {} ({} bytes)", KERNEL_NAME, file_buf.len());
 
     // ---- Measured boot: measure the on-disk kernel image and verify it ----
     measure_and_verify(&file_buf);
@@ -104,6 +101,34 @@ pub fn run() -> Status {
         marks[elf::MARK_END]
     );
     log::info!("kernel e_entry = 0x{:x}", loaded.e_entry);
+
+    // ---- Final placement (computed now so we can guard allocations) ----
+    // After ExitBootServices the kernel is moved from the staging region down to
+    // its final low physical address; `delta = -efi_loadaddr` maps the marks.
+    let delta = 0u64.wrapping_sub(efi_loadaddr);
+    let src = marks[elf::MARK_START];
+    let dst = marks[elf::MARK_START].wrapping_add(delta);
+    let kern_len = marks[elf::MARK_END] - marks[elf::MARK_START];
+    let dst_end = dst + kern_len;
+    let entry = (marks[elf::MARK_ENTRY] & 0x0fff_ffff).wrapping_add(delta);
+    let markend = marks[elf::MARK_END].wrapping_add(delta);
+    log::info!("kernel dst=0x{:x}..0x{:x} entry=0x{:x}", dst, dst_end, entry);
+
+    // The kernel destination range is overwritten by the post-ExitBootServices
+    // memmove, so any buffer the trampoline still needs (itself, the bootarg
+    // vector, the params block) must live entirely outside [dst, dst_end).
+    let assert_clear = |name: &str, base: u64, size: usize| {
+        let end = base + size as u64;
+        assert!(
+            end <= dst || base >= dst_end,
+            "{} [0x{:x},0x{:x}) overlaps the kernel destination [0x{:x},0x{:x})",
+            name,
+            base,
+            end,
+            dst,
+            dst_end
+        );
+    };
 
     // ---- Gather firmware info (ACPI/SMBIOS/system table/framebuffer) ----
     let (config_acpi, config_smbios) = find_acpi_smbios();
@@ -155,6 +180,7 @@ pub fn run() -> Status {
         av_pages,
     )
     .expect("failed to allocate bootarg buffer");
+    assert_clear("bootarg buffer", av_ptr.as_ptr() as u64, av_pages * PAGE_SIZE);
     unsafe { av_ptr.write_bytes(0u8, av_pages * PAGE_SIZE) };
     let av = unsafe { core::slice::from_raw_parts_mut(av_ptr.as_ptr(), av_pages * PAGE_SIZE) };
 
@@ -166,6 +192,7 @@ pub fn run() -> Status {
         tramp_pages,
     )
     .expect("failed to allocate trampoline");
+    assert_clear("trampoline", tramp_ptr.as_ptr() as u64, tramp_pages * PAGE_SIZE);
     unsafe {
         tramp_ptr.write_bytes(0u8, tramp_pages * PAGE_SIZE);
         tramp_ptr.copy_from_nonoverlapping(
@@ -186,6 +213,11 @@ pub fn run() -> Status {
     )
     .expect("failed to allocate trampoline params")
     .cast::<TrampParams>();
+    assert_clear(
+        "trampoline params",
+        params_ptr.as_ptr() as u64,
+        core::mem::size_of::<TrampParams>(),
+    );
 
     log::info!("Exiting boot services and entering kernel...");
 
@@ -230,20 +262,14 @@ pub fn run() -> Status {
         ba.push(bootargs::BOOTARG_BOOTDUID, &[0u8; 8]);
         let ac = ba.finish();
 
-        // ---- Compute final placement / entry ----
-        let delta = 0u64.wrapping_sub(efi_loadaddr);
-        let entry = (marks[elf::MARK_ENTRY] & 0x0fff_ffff).wrapping_add(delta);
-        let src = marks[elf::MARK_START];
-        let dst = marks[elf::MARK_START].wrapping_add(delta);
-        let len = marks[elf::MARK_END] - marks[elf::MARK_START];
-        let markend = marks[elf::MARK_END].wrapping_add(delta);
-
+        // Final placement (`delta`/`src`/`dst`/`kern_len`/`entry`/`markend`)
+        // was computed before ExitBootServices.
         serial::puts("[bsdloader] entry=");
         serial::puthex(entry);
         serial::puts(" dst=");
         serial::puthex(dst);
         serial::puts(" len=");
-        serial::puthex(len);
+        serial::puthex(kern_len);
         serial::puts(" ac=");
         serial::puthex(ac as u64);
         serial::puts("\r\n");
@@ -251,7 +277,7 @@ pub fn run() -> Status {
         params_ptr.write(TrampParams {
             src,
             dst,
-            len,
+            len: kern_len,
             entry,
             howto: 0,
             bootdev: 0,
@@ -342,45 +368,13 @@ fn load_efifb() -> Option<Fb> {
 ///   policy in use.
 fn measure_and_verify(kernel: &[u8]) {
     measure_image(kernel, PcrIndex(9), b"bsd.rd\0");
-    let kernel_sha256 = Sha256::digest(kernel);
 
-    let mut siginfo = vec![0u8; 256];
-    let public_key: [u8; 32] = if let Some(n) = load_image_from_disk("siginfo", &mut siginfo) {
-        let mut kernel_sha256_str = [0u8; 64];
-        hex::encode_to_slice(&kernel_sha256, &mut kernel_sha256_str).unwrap();
-        let kernel_sha256_str = core::str::from_utf8(&kernel_sha256_str).unwrap();
-        let manifest = format!("{}  bsd.rd\n", kernel_sha256_str);
+    let mut kernel_sha256_str = [0u8; 64];
+    hex::encode_to_slice(&Sha256::digest(kernel), &mut kernel_sha256_str).unwrap();
+    let kernel_sha256_str = core::str::from_utf8(&kernel_sha256_str).unwrap();
+    let manifest = format!("{}  bsd.rd\n", kernel_sha256_str);
 
-        let mut lines = core::str::from_utf8(&siginfo[..n])
-            .expect("siginfo is not valid utf-8")
-            .split('\n');
-        let mut public_key = [0u8; 32];
-        let mut signature = [0u8; 64];
-        hex::decode_to_slice(
-            lines.next().expect("missing public key").as_bytes(),
-            &mut public_key,
-        )
-        .expect("invalid public key");
-        hex::decode_to_slice(
-            lines.next().expect("missing signature").as_bytes(),
-            &mut signature,
-        )
-        .expect("invalid signature");
-        VerifyingKey::from_bytes(&public_key)
-            .expect("public key is not valid ed25519 point")
-            .verify(manifest.as_bytes(), &Signature::from_bytes(&signature))
-            .expect("signature verification failed");
-        log::info!("Verified bsd.rd Ed25519 signature");
-        public_key
-    } else {
-        [0u8; 32]
-    };
-
-    let mut public_key_hex = [0u8; 64];
-    hex::encode_to_slice(&public_key, &mut public_key_hex).unwrap();
-    let public_key_hex = core::str::from_utf8(&public_key_hex).unwrap();
-    let public_key_desc = format!("ed25519-{}", public_key_hex).into_bytes();
-    measure_image(&public_key_desc, PcrIndex(14), &public_key_desc);
+    crate::sig::verify_and_measure_key(manifest.as_bytes());
 }
 
 fn find_acpi_smbios() -> (u64, u64) {

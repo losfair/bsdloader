@@ -1,6 +1,5 @@
+use alloc::format;
 use alloc::{borrow::Cow, collections::btree_map::BTreeMap};
-use alloc::{format, vec};
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use sha2::{Digest, Sha256};
 use uefi::boot::AllocateType;
 use uefi::{prelude::*, proto::tcg::PcrIndex};
@@ -41,50 +40,19 @@ pub fn run() -> Status {
         parse_kenv(&kenv_buffer[..])
     };
 
-    let mut siginfo = vec![0u8; 256];
-    let public_key: [u8; 32] = if let Some(n) = load_image_from_disk("siginfo", &mut siginfo) {
-        let mut kernel_sha256_str = [0u8; 64];
-        hex::encode_to_slice(&kernel_sha256, &mut kernel_sha256_str).unwrap();
-        let kernel_sha256_str = core::str::from_utf8(&kernel_sha256_str).unwrap();
+    let mut kernel_sha256_str = [0u8; 64];
+    hex::encode_to_slice(&kernel_sha256, &mut kernel_sha256_str).unwrap();
+    let kernel_sha256_str = core::str::from_utf8(&kernel_sha256_str).unwrap();
 
-        let mut kenv_sha256_str = [0u8; 64];
-        hex::encode_to_slice(&kenv_sha256, &mut kenv_sha256_str).unwrap();
-        let kenv_sha256_str = core::str::from_utf8(&kenv_sha256_str).unwrap();
+    let mut kenv_sha256_str = [0u8; 64];
+    hex::encode_to_slice(&kenv_sha256, &mut kenv_sha256_str).unwrap();
+    let kenv_sha256_str = core::str::from_utf8(&kenv_sha256_str).unwrap();
 
-        let manifest = format!(
-            "{}  kernel.elf\n{}  kenv\n",
-            kernel_sha256_str, kenv_sha256_str
-        );
-
-        let mut siginfo = core::str::from_utf8(&siginfo[..n])
-            .expect("siginfo is not valid utf-8")
-            .split('\n');
-        let mut public_key = [0u8; 32];
-        let mut signature = [0u8; 64];
-        hex::decode_to_slice(
-            siginfo.next().expect("missing public key").as_bytes(),
-            &mut public_key,
-        )
-        .expect("invalid public key");
-        hex::decode_to_slice(
-            siginfo.next().expect("missing signature").as_bytes(),
-            &mut signature,
-        )
-        .expect("invalid signature");
-        VerifyingKey::from_bytes(&public_key)
-            .expect("public key is not valid ed25519 point")
-            .verify(manifest.as_bytes(), &Signature::from_bytes(&signature))
-            .expect("signature verification failed");
-        public_key
-    } else {
-        [0u8; 32]
-    };
-
-    let mut public_key_hex = [0u8; 64];
-    hex::encode_to_slice(&public_key, &mut public_key_hex).unwrap();
-    let public_key_hex = core::str::from_utf8(&public_key_hex).unwrap();
-    let public_key_desc = format!("ed25519-{}", public_key_hex).into_bytes();
-    measure_image(&public_key_desc, PcrIndex(14), &public_key_desc);
+    let manifest = format!(
+        "{}  kernel.elf\n{}  kenv\n",
+        kernel_sha256_str, kenv_sha256_str
+    );
+    crate::sig::verify_and_measure_key(manifest.as_bytes());
 
     let kernel_elf = load_elf(&mut kernel_load_region, &kernel_buffer);
     let memdisk = if let Some((offset, size)) = kernel_elf.memdisk_file_range {

@@ -89,7 +89,6 @@ pub fn read_tpm_event_log(staging: &mut StagingRegion) -> Option<StagingRegionHa
     Some(buf)
 }
 
-#[allow(dead_code)]
 pub fn measure_image(image: &[u8], pcr: PcrIndex, event_data: &[u8]) {
     static DID_PRINT_TCG_CAPABILITY: AtomicBool = AtomicBool::new(false);
 
