@@ -9,7 +9,47 @@ use uefi::{
     CStr16,
 };
 
+use alloc::vec;
+use alloc::vec::Vec;
+
 use crate::util::round_up;
+
+/// Read a whole file from the boot volume into an exactly-sized buffer.
+/// Returns `None` if the file cannot be opened or read.
+#[cfg_attr(not(feature = "openbsd"), allow(dead_code))]
+pub fn read_file(filename: &str) -> Option<Vec<u8>> {
+    let mut fs = uefi::boot::get_image_file_system(uefi::boot::image_handle())
+        .inspect_err(|e| log::error!("failed to get image file system: {:?}", e))
+        .ok()?;
+    let mut volume = fs
+        .open_volume()
+        .inspect_err(|e| log::error!("failed to open volume: {:?}", e))
+        .ok()?;
+    let mut filename_buf = [0u16; 16];
+    let fname = CStr16::from_str_with_buf(filename, &mut filename_buf).unwrap();
+    let file = volume
+        .open(fname, FileMode::Read, FileAttribute::empty())
+        .inspect_err(|e| log::error!("failed to open file '{}': {:?}", fname, e))
+        .ok()?;
+    let mut file = file.into_regular_file()?;
+
+    let mut file_info = OwnedBuffer::new(AllocateType::AnyPages, 4096);
+    let info = file
+        .get_info::<FileInfo>(&mut file_info)
+        .inspect_err(|e| log::error!("failed to get file info: {:?}", e))
+        .ok()?;
+    let size = info.file_size() as usize;
+
+    let mut buf = vec![0u8; size];
+    let n = file
+        .read(&mut buf)
+        .inspect_err(|e| log::error!("failed to read file: {:?}", e))
+        .ok()?;
+    buf.truncate(n);
+
+    log::info!("Loaded file: {}, size: {}", fname, n);
+    Some(buf)
+}
 
 pub struct OwnedBuffer {
     ptr: NonNull<u8>,
@@ -29,6 +69,7 @@ impl OwnedBuffer {
         }
     }
 
+    #[allow(dead_code)]
     pub fn leak(self) -> &'static mut [u8] {
         let ptr = self.ptr;
         let len = self.len;

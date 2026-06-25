@@ -1,10 +1,6 @@
 use core::{arch::global_asm, convert::Infallible, iter::once, ptr::NonNull};
 
 use alloc::{borrow::Cow, collections::btree_map::BTreeMap, format};
-use object::{
-    read::elf::{FileHeader, ProgramHeader},
-    Endianness, Object, ObjectSection,
-};
 use uefi::{
     boot::{
         AllocateType, MemoryAttribute, MemoryDescriptor, MemoryType, OpenProtocolAttributes,
@@ -17,6 +13,7 @@ use uefi::{
 };
 
 use crate::{
+    elf64::{Elf, PT_LOAD},
     modinfo,
     staging::{StagingRegion, StagingRegionHandle, STAGING_ALIGNMENT},
     tpm::read_tpm_event_log,
@@ -61,7 +58,6 @@ struct EfiFb {
 #[derive(Clone, Debug)]
 pub struct ElfInfo {
     pub entry: u64,
-    pub memdisk_file_range: Option<(u64, u64)>,
 }
 
 pub fn boot_kernel(
@@ -155,7 +151,13 @@ pub fn boot_kernel(
     }
 
     modinfo::push(&mut staging, modinfo::MODINFO_NAME, b"freebsd\0");
-    modinfo::push(&mut staging, modinfo::MODINFO_TYPE, b"elf64 kernel\0");
+    // The kernel module type must be "elf kernel" (KERNTYPE), the type the
+    // native FreeBSD loader emits and the one the kernel searches for. FreeBSD
+    // <= 14 also accepted the legacy "elf64 kernel" spelling as a fallback, but
+    // FreeBSD 15 removed that fallback (sys/kern/subr_module.c: preload_initkmdp
+    // searches only KERNTYPE) and panics with "unable to find kernel metadata"
+    // if it is missing.
+    modinfo::push(&mut staging, modinfo::MODINFO_TYPE, b"elf kernel\0");
 
     modinfo::push(
         &mut staging,
@@ -207,13 +209,13 @@ pub fn boot_kernel(
         "failed to allocate memory for trampoline"
     })?;
 
-    let trampcode_size = amd64_tramp_end as usize - amd64_tramp as usize;
+    let trampcode_size = amd64_tramp_end as *const () as usize - amd64_tramp as *const () as usize;
     assert!(trampcode_size <= PAGE_SIZE - 128);
 
     unsafe {
         trampcode.write_bytes(0u8, PAGE_SIZE);
         trampcode.copy_from_nonoverlapping(
-            NonNull::new(amd64_tramp as usize as *mut u8).expect("bad amd64_tramp"),
+            NonNull::new(amd64_tramp as *const () as *mut u8).expect("bad amd64_tramp"),
             trampcode_size,
         );
     }
@@ -294,32 +296,44 @@ pub fn boot_kernel(
     }
 }
 
+/// Size (bytes from `LOAD_START`) the loaded kernel occupies, i.e. the size the
+/// `region` passed to [`load_elf`] must have. Computed from the `PT_LOAD`
+/// extents so the staging region can be sized exactly.
+pub fn loaded_size(image: &[u8]) -> usize {
+    let elf = Elf::parse(image);
+    let mut max_end: u64 = 0;
+    for i in 0..elf.e_phnum() {
+        let ph = elf.phdr(i);
+        if ph.p_type != PT_LOAD {
+            continue;
+        }
+        let end = (ph.p_vaddr + ph.p_memsz)
+            .checked_sub(LOAD_START)
+            .expect("p_vaddr out of range");
+        max_end = max_end.max(end);
+    }
+    assert!(max_end != 0, "no PT_LOAD segments");
+    max_end as usize
+}
+
+/// `(file_offset, size)` of the embedded `.memdisk` section, if present.
+pub fn memdisk_range(image: &[u8]) -> Option<(usize, usize)> {
+    Elf::parse(image).section_by_name(b".memdisk")
+}
+
 pub fn load_elf(region: &mut [u8], image: &[u8]) -> ElfInfo {
-    let elf = object::File::parse(image).expect("failed to parse ELF");
-    let object::File::Elf64(elf) = elf else {
-        panic!("not elf64")
-    };
+    let elf = Elf::parse(image);
+    assert!(loaded_size(image) <= region.len());
 
-    let load_phdrs = || {
-        elf.elf_program_headers()
-            .iter()
-            .filter(|x| x.p_type(Endianness::Little) == object::elf::PT_LOAD)
-    };
-
-    let max_offset_from_start = load_phdrs()
-        .map(|x| x.p_vaddr(Endianness::Little) + x.p_memsz(Endianness::Little))
-        .max()
-        .unwrap_or_default()
-        .checked_sub(LOAD_START)
-        .expect("cannot determine elf max offset") as usize;
-    assert!(max_offset_from_start != 0);
-    assert!(max_offset_from_start <= region.len());
-
-    for phdr in load_phdrs() {
-        let p_filesz = phdr.p_filesz.get(Endianness::Little);
-        let p_offset = phdr.p_offset.get(Endianness::Little);
-        let p_vaddr = phdr.p_vaddr.get(Endianness::Little);
-        let p_memsz = phdr.p_memsz.get(Endianness::Little);
+    for i in 0..elf.e_phnum() {
+        let ph = elf.phdr(i);
+        if ph.p_type != PT_LOAD {
+            continue;
+        }
+        let p_filesz = ph.p_filesz;
+        let p_memsz = ph.p_memsz;
+        let p_vaddr = ph.p_vaddr;
+        let p_offset = ph.p_offset as usize;
 
         log::info!(
             "Segment: 0x{:08x}@0x{:08x} -> 0x{:016x}-0x{:016x}",
@@ -329,38 +343,20 @@ pub fn load_elf(region: &mut [u8], image: &[u8]) -> ElfInfo {
             p_vaddr + p_memsz,
         );
 
-        let Some(staging_offset) = p_vaddr.checked_sub(LOAD_START) else {
-            panic!("p_vaddr out of range");
-        };
+        let off = p_vaddr.checked_sub(LOAD_START).expect("p_vaddr out of range") as usize;
+        assert!(p_filesz <= p_memsz, "p_filesz > p_memsz");
 
-        let Ok(data) = phdr.data(Endianness::Little, image) else {
-            panic!("failed to dereference segment data");
-        };
-        assert_eq!(data.len(), p_filesz as usize);
-
-        if p_filesz > p_memsz {
-            panic!("p_filesz > p_memsz");
-        }
-
-        region[staging_offset as usize..(staging_offset + p_filesz) as usize].copy_from_slice(data);
+        region[off..off + p_filesz as usize]
+            .copy_from_slice(&image[p_offset..p_offset + p_filesz as usize]);
 
         if p_memsz > p_filesz {
             log::info!(" [bss 0x{:08x}]", p_memsz - p_filesz);
-            region[(staging_offset + p_filesz) as usize..(staging_offset + p_memsz) as usize]
-                .fill(0);
+            region[off + p_filesz as usize..off + p_memsz as usize].fill(0);
         }
     }
 
-    let memdisk_file_range = if let Some(x) = elf.section_by_name(".memdisk") {
-        x.file_range()
-    } else {
-        None
-    };
-
-    let entry = elf.elf_header().e_entry(Endianness::Little);
     ElfInfo {
-        entry,
-        memdisk_file_range,
+        entry: elf.e_entry(),
     }
 }
 

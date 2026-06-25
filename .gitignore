@@ -1,4 +1,10 @@
 /target/
 /esp/
+/dist/
 /kernel.tar
 /kernel.elf
+/esp.img
+/OVMF_VARS_test.fd
+/esp_rel.img
+/OVMF_VARS_rel.fd
+/run_obsd*.sh

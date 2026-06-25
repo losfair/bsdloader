@@ -1,6 +1,6 @@
 [package]
 name = "bsdloader"
-version = "0.1.1"
+version = "0.1.3"
 edition = "2021"
 
 [profile.release]
@@ -8,14 +8,23 @@ codegen-units = 1
 lto = true
 opt-level = 'z'
 
+[features]
+# A backend feature is REQUIRED; there is no default. Build with exactly one of:
+#   cargo build --release --no-default-features --features openbsd
+#   cargo build --release --no-default-features --features freebsd
+# OpenBSD/amd64 boot backend (bsd.rd / bsd via run_i386 handoff)
+openbsd = []
+# Original FreeBSD modinfo/memdisk backend
+freebsd = []
+
 [dependencies]
 ed25519-dalek = { version = "2", default-features = false, features = ["digest"] }
 hex = { version = "0.4", default-features = false }
 log = "0.4"
-object = { version = "0.36", default-features = false, features = [
-    "elf",
-    "read_core",
+miniz_oxide = { version = "0.8", default-features = false, features = [
+    "with-alloc",
 ] }
+rand_chacha = { version = "0.10.0", default-features = false }
 sha2 = { version = "0.10", default-features = false }
 uefi = { version = "0.32", features = [
     "alloc",

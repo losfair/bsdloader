@@ -30,35 +30,43 @@ jobs:
     - name: Verify reproducibility
       run: |
         set -e
+        for variant in openbsd freebsd; do
+          artifact="bsdloader-${variant}.efi"
 
-        # internally reproducible
-        hexdump -C < target/x86_64-unknown-uefi/release/bsdloader.efi > 1.hexdump
-        hexdump -C < /tmp/bsdloader-build/target/x86_64-unknown-uefi/release/bsdloader.efi > 2.hexdump
-        diff -u 1.hexdump 2.hexdump
+          # internally reproducible
+          hexdump -C < "dist/${artifact}" > 1.hexdump
+          hexdump -C < "/tmp/bsdloader-build/dist/${artifact}" > 2.hexdump
+          diff -u 1.hexdump 2.hexdump
 
-        # also check consistency with committed hash
-        calculated_hash="$(sha256sum target/x86_64-unknown-uefi/release/bsdloader.efi | head -c 64)"
-        echo "Calculated hash: $calculated_hash"
-        committed_hash="$(cat reproducible-sha256.txt | head -c 64)"
-        if [ "$calculated_hash" != "$committed_hash" ]; then
-          echo "Hash mismatch: $calculated_hash != $committed_hash"
-          exit 1
-        fi
+          # also check consistency with committed hash
+          calculated_hash="$(sha256sum "dist/${artifact}" | head -c 64)"
+          committed_hash="$(grep "  ${artifact}\$" reproducible-sha256.txt | head -c 64)"
+          echo "${artifact}: calculated=${calculated_hash} committed=${committed_hash}"
+          if [ "$calculated_hash" != "$committed_hash" ]; then
+            echo "Hash mismatch for ${artifact}: $calculated_hash != $committed_hash"
+            exit 1
+          fi
+        done
     - name: Sign
       if: startsWith(github.ref, 'refs/tags/')
       run: |
         set -e
         mkdir build
-        cp target/x86_64-unknown-uefi/release/bsdloader.efi ./build/
+        cp dist/bsdloader-openbsd.efi dist/bsdloader-freebsd.efi ./build/
         cd build
-        cosign sign-blob -y --bundle bsdloader.cosign-bundle.json bsdloader.efi
+        for variant in openbsd freebsd; do
+          cosign sign-blob -y \
+            --bundle "bsdloader-${variant}.cosign-bundle.json" \
+            "bsdloader-${variant}.efi"
+        done
         ls -lash
-        cat bsdloader.cosign-bundle.json
     - name: Publish release
       if: startsWith(github.ref, 'refs/tags/')
       uses: softprops/action-gh-release@v1
       with:
         files: |
-          ./build/bsdloader.efi
-          ./build/bsdloader.cosign-bundle.json
+          ./build/bsdloader-openbsd.efi
+          ./build/bsdloader-openbsd.cosign-bundle.json
+          ./build/bsdloader-freebsd.efi
+          ./build/bsdloader-freebsd.cosign-bundle.json
         prerelease: true
