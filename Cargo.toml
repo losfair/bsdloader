@@ -1,6 +1,6 @@
 [package]
 name = "bsdloader"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 
 [profile.release]
@@ -25,6 +25,7 @@ miniz_oxide = { version = "0.8", default-features = false, features = [
     "with-alloc",
 ] }
 rand_chacha = { version = "0.10.0", default-features = false }
+sha1 = { version = "0.10", default-features = false }
 sha2 = { version = "0.10", default-features = false }
 uefi = { version = "0.32", features = [
     "alloc",

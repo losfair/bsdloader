@@ -31,13 +31,14 @@ dependencies = [
 
 [[package]]
 name = "bsdloader"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "ed25519-dalek",
  "hex",
  "log",
  "miniz_oxide",
  "rand_chacha",
+ "sha1",
  "sha2",
  "uefi",
 ]
@@ -245,6 +246,17 @@ name = "semver"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "61697e0a1c7e512e84a621326239844a24d8207b4669b41bc18b32ea5cbf988b"
+
+[[package]]
+name = "sha1"
+version = "0.10.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e3bf829a2d51ab4a5ddf1352d8470c140cadc8301b2ae1789db023f01cedd6ba"
+dependencies = [
+ "cfg-if",
+ "cpufeatures",
+ "digest",
+]
 
 [[package]]
 name = "sha2"

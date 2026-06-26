@@ -23,7 +23,7 @@ use uefi::proto::tcg::PcrIndex;
 use uefi::table::cfg::{ACPI2_GUID, ACPI_GUID, SMBIOS_GUID};
 
 use crate::image_loader::read_file;
-use crate::tpm::measure_image;
+use crate::tpm::{measure_image, read_tpm_event_log_bytes};
 use crate::{sysmem, util::round_up};
 use bootargs::{serial, BiosConsdev, BiosEfiInfo, BootArgs};
 
@@ -173,6 +173,38 @@ pub fn run() -> Status {
         system_table,
         fb_addr
     );
+
+    if let Some(tpm_event_log) = read_tpm_event_log_bytes() {
+        let tpm_event_log_len = tpm_event_log.len();
+        let tpm_event_log_pages = round_up(tpm_event_log_len, PAGE_SIZE) / PAGE_SIZE;
+        let tpm_event_log_ptr = uefi::boot::allocate_pages(
+            AllocateType::MaxAddress(0x1_0000_0000u64),
+            MemoryType::RUNTIME_SERVICES_DATA,
+            tpm_event_log_pages,
+        )
+        .expect("failed to allocate TPM event log");
+        assert_clear(
+            "TPM event log",
+            tpm_event_log_ptr.as_ptr() as u64,
+            tpm_event_log_pages * PAGE_SIZE,
+        );
+        unsafe {
+            tpm_event_log_ptr.write_bytes(0u8, tpm_event_log_pages * PAGE_SIZE);
+            core::ptr::copy_nonoverlapping(
+                tpm_event_log.as_ptr(),
+                tpm_event_log_ptr.as_ptr(),
+                tpm_event_log_len,
+            );
+        }
+        ei.tpm_event_log = tpm_event_log_ptr.as_ptr() as u64;
+        ei.tpm_event_log_len = tpm_event_log_len as u32;
+        let tpm_event_log_addr = ei.tpm_event_log;
+        log::info!(
+            "TPM event log: {} bytes at 0x{:x}",
+            tpm_event_log_len,
+            tpm_event_log_addr
+        );
+    }
 
     // ---- Console device: serial COM1 ----
     let consdev = BiosConsdev {

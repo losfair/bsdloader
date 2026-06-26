@@ -1,18 +1,16 @@
 use core::sync::atomic::AtomicBool;
 
+use alloc::vec::Vec;
 use uefi::{
     proto::tcg::{
-        v2::{HashLogExtendEventFlags, PcrEventInputs, Tcg},
+        v2::{HashLogExtendEventFlags, PcrEvent, PcrEventDigests, PcrEventInputs, Tcg},
         EventType, PcrIndex,
     },
     Identify,
 };
 
 #[cfg(feature = "freebsd")]
-use uefi::{
-    boot::PAGE_SIZE,
-    proto::tcg::v2::{PcrEvent, PcrEventDigests},
-};
+use uefi::boot::PAGE_SIZE;
 
 #[cfg(feature = "freebsd")]
 use crate::{
@@ -20,7 +18,6 @@ use crate::{
     util::round_up,
 };
 
-#[cfg(feature = "freebsd")]
 #[allow(dead_code)]
 struct VeryUnsafeEventLog {
     location: *const u8,
@@ -31,6 +28,14 @@ struct VeryUnsafeEventLog {
 
 #[cfg(feature = "freebsd")]
 pub fn read_tpm_event_log(staging: &mut StagingRegion) -> Option<StagingRegionHandle> {
+    let data = read_tpm_event_log_bytes()?;
+    let buf_size = data.len() + 4;
+    let mut buf = staging.allocate(round_up(buf_size, PAGE_SIZE));
+    buf.iter_mut().zip(data).for_each(|(a, b)| *a = b);
+    Some(buf)
+}
+
+pub fn read_tpm_event_log_bytes() -> Option<Vec<u8>> {
     let Some(protocol) =
         uefi::boot::locate_handle_buffer(uefi::boot::SearchType::ByProtocol(&Tcg::GUID))
             .ok()
@@ -54,39 +59,85 @@ pub fn read_tpm_event_log(staging: &mut StagingRegion) -> Option<StagingRegionHa
         header.len()
     );
 
-    let it = || {
-        let body = event_log.iter().flat_map(|log| {
-            log.pcr_index()
-                .0
-                .to_le_bytes()
+    // Active PCR-bank algorithms, taken from the first crypto-agile event.
+    let algs: Vec<u16> = event_log
+        .iter()
+        .next()
+        .map(|first| {
+            fix_pcr_event_digests_lifetime(&first)
                 .into_iter()
-                .chain(log.event_type().0.to_le_bytes())
-                .chain(
-                    (fix_pcr_event_digests_lifetime(&log).into_iter().count() as u32).to_le_bytes(),
-                )
-                .chain(
-                    fix_pcr_event_digests_lifetime(&log)
-                        .into_iter()
-                        .flat_map(|digest| {
-                            digest
-                                .0
-                                 .0
-                                .to_le_bytes()
-                                .into_iter()
-                                .chain(digest.1.iter().copied())
-                        }),
-                )
-                .chain((log.event_data().len() as u32).to_le_bytes())
-                .chain(fix_pcr_event_data_lifetime(&log).iter().copied())
-        });
-        header.iter().copied().chain(body)
-    };
+                .map(|digest| (digest.0).0)
+                .collect()
+        })
+        .unwrap_or_default();
 
-    let data_size = it().count();
-    let buf_size = data_size + 4;
-    let mut buf = staging.allocate(round_up(buf_size, PAGE_SIZE));
-    buf.iter_mut().zip(it()).for_each(|(a, b)| *a = b);
-    Some(buf)
+    let mut data: Vec<u8> = Vec::new();
+    data.extend_from_slice(header);
+    for log in event_log.iter() {
+        data.extend_from_slice(&log.pcr_index().0.to_le_bytes());
+        data.extend_from_slice(&log.event_type().0.to_le_bytes());
+        data.extend_from_slice(
+            &(fix_pcr_event_digests_lifetime(&log).into_iter().count() as u32).to_le_bytes(),
+        );
+        for digest in fix_pcr_event_digests_lifetime(&log).into_iter() {
+            data.extend_from_slice(&(digest.0).0.to_le_bytes());
+            data.extend_from_slice(digest.1);
+        }
+        data.extend_from_slice(&(log.event_data().len() as u32).to_le_bytes());
+        data.extend_from_slice(fix_pcr_event_data_lifetime(&log));
+    }
+
+    // The firmware measures these EV_EFI_ACTION events into PCR 5 as part of
+    // ExitBootServices(), which happens *after* we snapshot the TCG2 log above,
+    // so they are missing from our copy even though the live PCR 5 (and any
+    // later quote) reflects them. Append them with the correct EV_EFI_ACTION
+    // type so the handed-off log replays cleanly against the post-EBS PCR 5.
+    // Without this, parsers such as go-eventlog detect the gap, inject
+    // synthetic EBS events with a default (EV_PREBOOT_CERT) type, and then
+    // reject the log ("ExitBootServices event but non EFIAction type: 0").
+    if !algs.is_empty() {
+        const EV_EFI_ACTION: u32 = 0x8000_0007;
+        const EBS_PCR: u32 = 5;
+        for action in [
+            b"Exit Boot Services Invocation".as_slice(),
+            b"Exit Boot Services Returned with Success".as_slice(),
+        ] {
+            data.extend(encode_event2(EBS_PCR, EV_EFI_ACTION, &algs, action));
+        }
+    }
+
+    Some(data)
+}
+
+/// Hash `data` with the TPM hash algorithm identified by `alg` (a `TPMI_ALG_HASH`
+/// value as it appears in a crypto-agile event log).
+fn hash_action(alg: u16, data: &[u8]) -> Vec<u8> {
+    use sha2::Digest;
+    match alg {
+        0x0004 => sha1::Sha1::digest(data).to_vec(),
+        0x000b => sha2::Sha256::digest(data).to_vec(),
+        0x000c => sha2::Sha384::digest(data).to_vec(),
+        0x000d => sha2::Sha512::digest(data).to_vec(),
+        other => panic!("unsupported TPM event-log hash algorithm {other:#06x}"),
+    }
+}
+
+/// Encode a TCG_PCR_EVENT2 record (crypto-agile event log entry) for the given
+/// PCR, event type, active hash algorithms and event data. The recorded digest
+/// for each bank is the hash of `data`, matching how firmware measures
+/// EV_EFI_ACTION events.
+fn encode_event2(pcr: u32, event_type: u32, algs: &[u16], data: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&pcr.to_le_bytes());
+    out.extend_from_slice(&event_type.to_le_bytes());
+    out.extend_from_slice(&(algs.len() as u32).to_le_bytes());
+    for &alg in algs {
+        out.extend_from_slice(&alg.to_le_bytes());
+        out.extend_from_slice(&hash_action(alg, data));
+    }
+    out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    out.extend_from_slice(data);
+    out
 }
 
 pub fn measure_image(image: &[u8], pcr: PcrIndex, event_data: &[u8]) {
@@ -138,18 +189,15 @@ pub fn measure_image(image: &[u8], pcr: PcrIndex, event_data: &[u8]) {
     log::info!("Extended PCR {}", pcr.0);
 }
 
-#[cfg(feature = "freebsd")]
 fn fix_pcr_event_digests_lifetime<'a>(event: &PcrEvent<'a>) -> PcrEventDigests<'a> {
     let bad = event.digests();
     unsafe { core::mem::transmute::<PcrEventDigests<'_>, PcrEventDigests<'a>>(bad) }
 }
 
-#[cfg(feature = "freebsd")]
 fn fix_pcr_event_data_lifetime<'a>(event: &PcrEvent<'a>) -> &'a [u8] {
     unsafe { core::mem::transmute::<&[u8], &'a [u8]>(event.event_data()) }
 }
 
-#[cfg(feature = "freebsd")]
 fn get_tpm2_header(log: &VeryUnsafeEventLog) -> &[u8] {
     unsafe {
         let ptr_u32: *const u32 = log.location.cast();

@@ -48,6 +48,8 @@ pub struct BiosEfiInfo {
     pub mmap_start: u64,
     pub system_table: u64,
     pub config_esrt: u64,
+    pub tpm_event_log: u64,
+    pub tpm_event_log_len: u32,
 }
 
 #[repr(C, packed)]
